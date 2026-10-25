@@ -8,6 +8,7 @@ profile cools down before anything else is sent.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import time
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from studiowright.store import Store
 
 
-def _env_seconds(name: str, default: float) -> float:
+def env_seconds(name: str, default: float) -> float:
     value = os.environ.get(name, "").strip()
     try:
         return float(value) if value else default
@@ -38,18 +39,45 @@ class PaceSettings:
         """Upscaled downloads: Flow refused them with "unusual activity" after ~45 in 37 min,
         so they are spaced wider and pause for an hour after a refusal."""
         return cls(
-            gap_s=_env_seconds("STUDIOWRIGHT_UPSCALE_GAP_S", 60.0),
-            jitter_s=_env_seconds("STUDIOWRIGHT_UPSCALE_JITTER_S", 20.0),
-            cooldown_s=_env_seconds("STUDIOWRIGHT_UPSCALE_COOLDOWN_S", 60 * 60.0),
+            gap_s=env_seconds("STUDIOWRIGHT_UPSCALE_GAP_S", 60.0),
+            jitter_s=env_seconds("STUDIOWRIGHT_UPSCALE_JITTER_S", 20.0),
+            cooldown_s=env_seconds("STUDIOWRIGHT_UPSCALE_COOLDOWN_S", 60 * 60.0),
         )
 
     @classmethod
-    def from_env(cls) -> PaceSettings:
+    def load(cls, store: Store, profile: str) -> PaceSettings:
+        """The profile's saved pacing (``sw pace set``), with environment variables on top."""
+        saved = saved_pace(store, profile)
         return cls(
-            gap_s=_env_seconds("STUDIOWRIGHT_GAP_S", cls.gap_s),
-            jitter_s=_env_seconds("STUDIOWRIGHT_JITTER_S", cls.jitter_s),
-            cooldown_s=_env_seconds("STUDIOWRIGHT_COOLDOWN_S", cls.cooldown_s),
+            gap_s=env_seconds("STUDIOWRIGHT_GAP_S", saved.get("gap_s", cls.gap_s)),
+            jitter_s=env_seconds("STUDIOWRIGHT_JITTER_S", saved.get("jitter_s", cls.jitter_s)),
+            cooldown_s=env_seconds(
+                "STUDIOWRIGHT_COOLDOWN_S", saved.get("cooldown_s", cls.cooldown_s)
+            ),
         )
+
+
+PACE_FIELDS = ("gap_s", "jitter_s", "cooldown_s")
+
+
+def saved_pace(store: Store, profile: str) -> dict[str, float]:
+    saved = json.loads(store.get_setting(f"pace.{profile}") or "{}")
+    return {key: float(saved[key]) for key in PACE_FIELDS if key in saved}
+
+
+def save_pace(store: Store, profile: str, values: dict[str, float | None]) -> dict[str, float]:
+    """Keep the given values for the profile (None leaves a value as it is); the result is
+    what is saved now. An empty ``values`` after a reset falls back to the defaults."""
+    saved = saved_pace(store, profile)
+    for key, value in values.items():
+        if key not in PACE_FIELDS:
+            raise ValueError(f"unknown pacing setting {key!r}")
+        if value is not None:
+            if value < 0:
+                raise ValueError(f"{key} must not be negative")
+            saved[key] = float(value)
+    store.set_setting(f"pace.{profile}", json.dumps(saved))
+    return saved
 
 
 class CoolingDown(RuntimeError):
@@ -67,7 +95,7 @@ class Governor:
     def __init__(self, store: Store, profile: str, settings: PaceSettings | None = None) -> None:
         self.store = store
         self.profile = profile
-        self.settings = settings or PaceSettings.from_env()
+        self.settings = settings or PaceSettings.load(store, profile)
 
     def reserve(self, now: float | None = None) -> float:
         """Reserve the next submit slot and return how long to wait for it."""

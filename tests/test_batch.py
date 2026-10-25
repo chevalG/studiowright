@@ -92,3 +92,18 @@ async def test_invalid_options_are_reported_not_raised(tmp_path: Path) -> None:
     summary = await b.run_batch(path, never, never)
     record = json.loads(b.results_path(path).read_text(encoding="utf-8"))
     assert summary.failed == 1 and record["status"] == "invalid"
+
+
+def test_batch_file_with_a_bom_and_non_ascii_paths(tmp_path: Path) -> None:
+    folder = tmp_path / "Örnek klasör" / "çekim"
+    folder.mkdir(parents=True)
+    (folder / "kare.png").write_bytes(b"x")
+    path = folder / "jobs.jsonl"
+    job = {"id": "ş1", "kind": "video", "prompt": "yağmur", "start": "kare.png"}
+    # PowerShell's Out-File and Notepad write UTF-8 with a byte-order mark.
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps(job, ensure_ascii=False).encode("utf-8"))
+    jobs = b.load_jobs(path)
+    assert jobs[0]["id"] == "ş1"
+    request = b.build_request(jobs[0], {}, folder)
+    assert isinstance(request, VideoRequest)
+    assert request.start == str(folder / "kare.png")

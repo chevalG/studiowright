@@ -151,3 +151,20 @@ def test_rename_profile_moves_every_record(two_profiles: Store) -> None:
     assert rows["pacing"] == ["ab", "ab:music", "ab:upscale", "main", "main:music", "main:upscale"]
     assert two_profiles.get_setting("project.default.main") == "p1"
     assert two_profiles.get_setting("project.default.a") is None
+
+
+def test_saved_pace_is_used_and_env_wins(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
+    from studiowright.pacing import save_pace
+
+    for name in ("STUDIOWRIGHT_GAP_S", "STUDIOWRIGHT_JITTER_S", "STUDIOWRIGHT_COOLDOWN_S"):
+        monkeypatch.delenv(name, raising=False)
+    assert PaceSettings.load(store, "p").gap_s == PaceSettings.gap_s
+    save_pace(store, "p", {"gap_s": 150, "jitter_s": 30, "cooldown_s": None})
+    settings = PaceSettings.load(store, "p")
+    assert (settings.gap_s, settings.jitter_s, settings.cooldown_s) == (150, 30, 1800)
+    assert PaceSettings.load(store, "other").gap_s == PaceSettings.gap_s
+    assert Governor(store, "p").settings.gap_s == 150
+    monkeypatch.setenv("STUDIOWRIGHT_GAP_S", "45")
+    assert PaceSettings.load(store, "p").gap_s == 45
+    with pytest.raises(ValueError, match="negative"):
+        save_pace(store, "p", {"gap_s": -1})

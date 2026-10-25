@@ -327,8 +327,10 @@ or in `~/.gemini/settings.json`:
 | `flow_generate_image` | Images with any model, aspect, count, references and download size |
 | `flow_generate_video` | Clips with any model and mode, frames, references, size; `dry_run`, `max_credits` |
 | `flow_upload` / `flow_download` | Upload references once; fetch existing media again at any size |
+| `flow_list_media` | A project's media, newest first: id, kind, title, grid position |
 | `flow_create_project` / `flow_use_project` | Choose where Flow keeps the work |
 | `flow_options` / `flow_status` | Every model and option; recent jobs, pacing and cooldown |
+| `flow_pace` | Show or save a profile's pacing (seconds between submits, cooldown) |
 | `music_generate` | A song or instrumental, with lyrics, BPM, length, seed, model, title, cover art |
 | `music_edit` | Extend, cover, replace, variation or trim an existing song |
 | `music_stems` | Split a song into drums, bass, vocals and other |
@@ -356,10 +358,12 @@ sw video "PROMPT" [--model omni-flash|veo-lite|veo-fast|veo-quality] [--mode fra
 
 sw upload FILE ...                 # upload references once, print their media ids
 sw download MEDIA_ID ... [--size 2K|1080p]
+sw media list [--project ID] [--limit N] [--json]   # what a project holds, newest first
 sw project create "TITLE" | use ID | list
 sw run BATCH.jsonl [--keep-going]
 sw credits                         # Flow (as of the last clip) and Flow Music balances
-sw jobs | sw pace | sw window show|hide | sw stop | sw mcp
+sw pace [set --gap S --jitter S --cooldown S | --reset]   # show or save pacing
+sw jobs | sw window show|hide | sw stop | sw mcp
 ```
 
 ### Music
@@ -414,14 +418,16 @@ sw run shots.jsonl
 
 ## Costs and safety
 
-Prices as Flow and Flow Music showed them in October 2026. Your plan may differ.
+Prices as Flow and Flow Music showed them on 25 October 2026. They differ between accounts
+(Veo Fast was 10 credits on one and 20 on another that day) and Flow changes them: a dry
+run (`--dry-run`, `dry_run=true`) shows your current price for free.
 
 | Google Flow | Credits |
 | --- | --- |
 | Image, any Nano Banana model | 0 (daily quota) |
 | Omni Flash clip, 360p, 4 s | 4 |
 | Omni Flash clip, 720p, 4 / 6 / 8 / 10 s | 7 / 10 / 12 / 15 |
-| Veo 3.1 Lite / Fast / Quality, 8 s | 10 / 20 / 100 |
+| Veo 3.1 Lite / Fast / Quality, 8 s | 10 / 10 or 20 / 100 |
 
 | Google Flow Music | Credits | Time |
 | --- | --- | --- |
@@ -433,8 +439,11 @@ Prices as Flow and Flow Music showed them in October 2026. Your plan may differ.
 Built-in guards:
 
 - `--dry-run` / `dry_run` sets up a clip and reports Flow's price without submitting.
+  It uploads nothing: frames and references do not change the price.
 - `--max-credits` / `max_credits` refuses a clip that costs more.
-- Submits are spaced (20 s plus jitter) per profile, across processes.
+- Submits are spaced (20 s plus jitter) per profile, across processes. `sw pace set
+  --gap 150` (or `flow_pace`) keeps a slower pace for a profile that Google has asked
+  to slow down.
 - When Google reports unusual activity, the profile cools down for 30 minutes and every
   call says so instead of retrying.
 - One job at a time per profile (and one Flow Music job at a time), queued by a lock.
@@ -492,6 +501,16 @@ the ids.
 </details>
 
 <details>
+<summary><b>An image is in Flow but the job said it failed</b></summary>
+
+Flow's page cancels some replies once it has read them, and Chrome then keeps no copy, so
+StudioWright reads every reply as it streams in. If an image reply is lost all the same,
+the job looks the new image up in the project's media list, downloads it and says
+"recovered from the project grid". `sw media list` shows what a project holds;
+`sw download <media id>` fetches any of it.
+</details>
+
+<details>
 <summary><b>"unusual activity" / cooldown</b></summary>
 
 Google asked for a break. Wait for the cooldown (`sw pace` shows it), and spread large
@@ -538,10 +557,11 @@ the PATH. `sw mcp` run in a terminal should wait silently for input.
 | `STUDIOWRIGHT_PROFILE` | Chrome profile to use | `default` |
 | `STUDIOWRIGHT_HOME` | data directory: profiles, job database, incidents | `%LOCALAPPDATA%\studiowright` on Windows |
 | `STUDIOWRIGHT_OUTPUT` | where files are saved | `Downloads/studiowright` |
-| `STUDIOWRIGHT_GAP_S`, `STUDIOWRIGHT_JITTER_S` | pacing between submits | 20 s + 0-6 s |
+| `STUDIOWRIGHT_GAP_S`, `STUDIOWRIGHT_JITTER_S` | pacing between submits; overrides `sw pace set` | 20 s + 0-6 s |
 | `STUDIOWRIGHT_COOLDOWN_S` | pause after an unusual-activity refusal | 1800 s |
 | `STUDIOWRIGHT_UPSCALE_GAP_S`, `STUDIOWRIGHT_UPSCALE_JITTER_S` | spacing of upscaled downloads | 60 s + 0-20 s |
 | `STUDIOWRIGHT_UPSCALE_COOLDOWN_S` | pause of upscales after a refusal | 3600 s |
+| `STUDIOWRIGHT_IMAGE_TIMEOUT_S` | how long to wait for an image reply before looking in the project | 240 s |
 | `STUDIOWRIGHT_SOURCE` | what the Claude Code plugin runs with `uvx --from` (e.g. a local checkout) | the plugin's own release |
 
 ### Several Google accounts

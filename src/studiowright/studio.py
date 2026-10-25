@@ -375,6 +375,33 @@ class Studio:
         finally:
             self._download_lock.release()
 
+    async def media(self, project: str | None = None, limit: int = 50) -> dict[str, Any]:
+        """A project's media, newest first: id, kind, title and grid position.
+
+        Runs in the download tab under the download lock, beside generations.
+        """
+        await asyncio.to_thread(self._download_lock.acquire)
+        try:
+            project_id = await self._project(project)
+            flow = await FlowPage.open(self.session, project_id, role="download")
+            items = await flow.list_media()
+            return {
+                "project_id": project_id,
+                "total": len(items),
+                "media": [
+                    {
+                        "position": position,
+                        "media_id": item.media_id,
+                        "kind": item.kind,
+                        "title": item.title,
+                        "created": round(item.created) if item.created else None,
+                    }
+                    for position, item in enumerate(items[:limit])
+                ],
+            }
+        finally:
+            self._download_lock.release()
+
     async def _fail(self, job_id: str, exc: BaseException, site: str) -> None:
         """Record a failed job with a screenshot of the page it failed on."""
         shot = None
@@ -500,9 +527,13 @@ class Studio:
             await flow.apply_image_options(request.options)
             for media_id in media_ids:
                 await flow.attach_reference(media_id)
-            results = await self._submit_guarded(lambda: flow.generate_images(request.prompt))
+            results = await self._submit_guarded(
+                lambda: flow.generate_images(request.prompt, request.options.count)
+            )
             stem = time.strftime("%Y%m%d-%H%M%S") + f"-image-{job_id[:6]}"
             notes: list[str] = []
+            if any(r.recovered for r in results):
+                notes.append("recovered from the project grid (Flow's reply was not readable)")
             files = await self._download_all(
                 flow,
                 [(r.media_id, r.url, r.workflow_id) for r in results],
@@ -560,11 +591,16 @@ class Studio:
         self.store.update_job(job_id, status="running", started=started)
         try:
             flow = await FlowPage.open(self.session, project_id)
-            frames = [ref for ref in (request.start, request.end) if ref]
-            frame_ids = await self._media_ids(flow, frames)
-            ref_ids = await self._media_ids(flow, request.refs)
+            # The price does not depend on the frames or references, so a dry run reads it
+            # without uploading any of them into the project.
+            frame_ids: list[str] = []
+            ref_ids: list[str] = []
+            if not request.dry_run:
+                frames = [ref for ref in (request.start, request.end) if ref]
+                frame_ids = await self._media_ids(flow, frames)
+                ref_ids = await self._media_ids(flow, request.refs)
             await flow.reset()
-            if options.mode is VideoMode.FRAMES and request.start:
+            if options.mode is VideoMode.FRAMES and frame_ids:
                 await flow.set_start_frame(frame_ids[0])
             credits = await flow.apply_video_options(options)
             if request.dry_run:

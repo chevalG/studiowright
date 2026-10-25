@@ -65,7 +65,8 @@ class BatchError(ValueError):
 
 
 def load_jobs(path: Path) -> list[dict[str, Any]]:
-    text = path.read_text(encoding="utf-8").strip()
+    # utf-8-sig: Windows tools often start the file with a byte-order mark.
+    text = path.read_text(encoding="utf-8-sig").strip()
     if not text:
         return []
     if text.startswith("["):

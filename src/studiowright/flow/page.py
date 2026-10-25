@@ -8,26 +8,34 @@ listeners, to learn ids, signed URLs and status.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
-from playwright.async_api import FileChooser, Locator, Page, Request, Response
+from playwright.async_api import CDPSession, FileChooser, Locator, Page
 
 from studiowright.browser import ChromeSession, DownloadCatcher, ensure_rendering
 from studiowright.flow import batchexecute as be
 from studiowright.flow import replies
 from studiowright.flow import selectors as s
 from studiowright.flow.options import ImageOptions, VideoOptions, count_pattern, duration_pattern
+from studiowright.pacing import env_seconds
 
 log = logging.getLogger("studiowright.flow")
 
 FLOW_ROOT = "https://flow.google.com/"
 IMAGE_RPC = "ogiZ0b"
+#: The project's media list, loaded with the project page.
+LIST_RPC = "Zzl0ze"
+#: Server and local clocks may differ a little when telling new media from old.
+CLOCK_SLACK_S = 120
 UPLOAD_RPC = "maseQ"
 VIDEO_SUBMIT_RPCS = ("YhhmEf", "eb1hJf", "MZZa6b", "nprQif")
 VIDEO_STATUS_RPCS = ("jwpduf", "as29s")
@@ -100,9 +108,12 @@ FAILED_TILES_JS = r"""
 """
 
 
-def _rpc(url: str) -> str:
-    match = re.search(r"[?&]rpcids=([A-Za-z0-9]+)", url)
-    return match.group(1) if match else ""
+def _rpcs(url: str) -> list[str]:
+    """The RPC ids a batchexecute request carries; one request can carry several."""
+    if "batchexecute" not in url:
+        return []
+    ids = parse_qs(urlsplit(url).query).get("rpcids", [""])[0]
+    return [rpc for rpc in ids.split(",") if rpc]
 
 
 #: Scroll the grid's own container until ``img[data-media-id=…]`` exists. The grid lists
@@ -162,57 +173,130 @@ TILE_TITLE_JS = r"""
 """
 
 
+#: The grid's rendered tiles, top first: ``[media_id, "image" | "video", title]``.
+GRID_TILES_JS = r"""
+() => {
+  const seen = new Set();
+  return [...document.querySelectorAll('flow-image-tile, flow-video-tile')].flatMap((tile) => {
+    const holder = tile.querySelector('[data-media-id]');
+    const id = holder && holder.getAttribute('data-media-id');
+    if (!id || seen.has(id)) return [];
+    seen.add(id);
+    const copy = tile.cloneNode(true);
+    copy.querySelectorAll('mat-icon, img').forEach((e) => e.remove());
+    const title = copy.textContent.replace(/\s+/g, ' ').replace(/…$/, '').trim() || null;
+    return [[id, tile.tagName.toLowerCase() === 'flow-video-tile' ? 'video' : 'image', title]];
+  });
+}
+"""
+
+
 def _asb_token(src: str) -> str | None:
     match = re.search(r"/asb/([^=?]+)", src)
     return match.group(1) if match else None
 
 
-class ReplyWatch:
-    """Collect the bodies of selected RPC replies while it is attached to a page."""
+@dataclass
+class _Reply:
+    rpcs: list[str]
+    status: int
+    chunks: list[bytes] = field(default_factory=list)
+    streaming: bool = False
+    stream: asyncio.Future[None] | None = None
 
-    def __init__(
-        self,
-        page: Page,
-        rpcs: Sequence[str] | None,
-        on_request: Callable[[str], None] | None = None,
-    ) -> None:
+
+class ReplyWatch:
+    """Collect the bodies of selected batchexecute replies while it is attached to a page.
+
+    Replies are read through a DevTools session of its own that streams each reply's data
+    as it arrives. Flow's page cancels some replies once it has read them (a project's media
+    list, at times an image reply), and Chrome keeps no body for a cancelled request; read
+    the usual way, such a reply looks as if it never came. Requests are never intercepted
+    or changed. ``unreadable`` lists wanted replies whose body was lost all the same.
+    """
+
+    def __init__(self, page: Page, rpcs: Sequence[str] | None) -> None:
         self.page = page
         #: None means every batchexecute reply.
         self.rpcs = set(rpcs) if rpcs is not None else None
-        self.on_request_cb = on_request
         self.bodies: list[tuple[str, int, str]] = []
-        self._tasks: list[asyncio.Future[None]] = []
+        self.unreadable: list[str] = []
         self.changed = asyncio.Event()
+        self._cdp: CDPSession | None = None
+        self._replies: dict[str, _Reply] = {}
+        self._tasks: list[asyncio.Future[None]] = []
 
     def _wanted(self, rpc: str) -> bool:
-        return bool(rpc) and (self.rpcs is None or rpc in self.rpcs)
+        return self.rpcs is None or rpc in self.rpcs
 
-    def _on_request(self, request: Request) -> None:
-        rpc = _rpc(request.url)
-        if self._wanted(rpc) and self.on_request_cb:
-            self.on_request_cb(rpc)
-
-    async def _read(self, response: Response, rpc: str) -> None:
-        try:
-            text = await response.text()
-        except Exception:  # the body is gone if the page navigated; nothing to learn
+    def _on_response(self, event: dict[str, Any]) -> None:
+        rpcs = [rpc for rpc in _rpcs(event["response"]["url"]) if self._wanted(rpc)]
+        if not rpcs:
             return
-        self.bodies.append((rpc, response.status, text))
+        reply = _Reply(rpcs, event["response"]["status"])
+        reply.stream = asyncio.ensure_future(self._stream(event["requestId"], reply))
+        self._replies[event["requestId"]] = reply
+
+    async def _stream(self, request_id: str, reply: _Reply) -> None:
+        assert self._cdp is not None
+        try:
+            started = await self._cdp.send(
+                "Network.streamResourceContent", {"requestId": request_id}
+            )
+        except Exception:  # already finished (its body is kept), or an older Chrome
+            return
+        reply.chunks.insert(0, base64.b64decode(started.get("bufferedData", "")))
+        reply.streaming = True
+
+    def _on_data(self, event: dict[str, Any]) -> None:
+        reply = self._replies.get(event["requestId"])
+        if reply is not None and event.get("data"):
+            reply.chunks.append(base64.b64decode(event["data"]))
+
+    def _on_end(self, event: dict[str, Any], finished: bool) -> None:
+        reply = self._replies.pop(event["requestId"], None)
+        if reply is not None:
+            read = self._read(event["requestId"], reply, finished)
+            self._tasks.append(asyncio.ensure_future(read))
+
+    async def _read(self, request_id: str, reply: _Reply, finished: bool) -> None:
+        assert self._cdp is not None
+        if reply.stream is not None:
+            await reply.stream
+        text: str | None = None
+        if reply.streaming:
+            text = b"".join(reply.chunks).decode("utf-8", "replace")
+        elif finished:
+            try:
+                body = await self._cdp.send("Network.getResponseBody", {"requestId": request_id})
+                text = body["body"]
+                if body["base64Encoded"]:
+                    text = base64.b64decode(text).decode("utf-8", "replace")
+            except Exception as exc:
+                log.info("reply %s could not be read: %s", ",".join(reply.rpcs), exc)
+        if text is None:
+            self.unreadable.extend(reply.rpcs)
+        else:
+            self.bodies.extend((rpc, reply.status, text) for rpc in reply.rpcs)
         self.changed.set()
 
-    def _on_response(self, response: Response) -> None:
-        rpc = _rpc(response.url)
-        if self._wanted(rpc):
-            self._tasks.append(asyncio.ensure_future(self._read(response, rpc)))
-
-    def __enter__(self) -> ReplyWatch:
-        self.page.on("request", self._on_request)
-        self.page.on("response", self._on_response)
+    async def __aenter__(self) -> ReplyWatch:
+        self._cdp = await self.page.context.new_cdp_session(self.page)
+        self._cdp.on("Network.responseReceived", self._on_response)
+        self._cdp.on("Network.dataReceived", self._on_data)
+        self._cdp.on("Network.loadingFinished", lambda event: self._on_end(event, True))
+        self._cdp.on("Network.loadingFailed", lambda event: self._on_end(event, False))
+        await self._cdp.send("Network.enable")
         return self
 
-    def __exit__(self, *_: object) -> None:
-        self.page.remove_listener("request", self._on_request)
-        self.page.remove_listener("response", self._on_response)
+    async def __aexit__(self, *_: object) -> None:
+        # Replies that already ended are read before the session goes.
+        pending = [task for task in self._tasks if not task.done()]
+        if pending:
+            await asyncio.wait(pending, timeout=5)
+        if self._cdp is not None:
+            with contextlib.suppress(Exception):
+                await self._cdp.detach()
 
     async def wait(self, timeout_s: float) -> bool:
         """Wait for the next reply; False on timeout."""
@@ -433,7 +517,7 @@ class FlowPage:
     ) -> list[replies.UploadResult]:
         """Upload files through one file chooser, in the order given."""
         log.info("upload %d file(s)", len(files))
-        with ReplyWatch(self.page, [UPLOAD_RPC]) as watch:
+        async with ReplyWatch(self.page, [UPLOAD_RPC]) as watch:
             chooser = await self._open_file_chooser()
             await chooser.set_files([str(f) for f in files])
             deadline = time.monotonic() + timeout_s
@@ -621,28 +705,84 @@ class FlowPage:
         await submit.click()
 
     async def generate_images(
-        self, prompt: str, timeout_s: float = 240
+        self, prompt: str, count: int = 1, timeout_s: float | None = None
     ) -> list[replies.ImageResult]:
-        with ReplyWatch(self.page, [IMAGE_RPC]) as watch:
+        """Submit and return the new images.
+
+        Flow answers with ``ogiZ0b``. If no readable answer arrives in time (the page can
+        cancel it once read, which once looked like a lost reply), the new images are taken
+        from the project's media list instead and marked ``recovered``.
+        """
+        if timeout_s is None:
+            timeout_s = env_seconds("STUDIOWRIGHT_IMAGE_TIMEOUT_S", 240)
+        before = await self.grid_media_ids()
+        submitted = time.time()
+        async with ReplyWatch(self.page, [IMAGE_RPC]) as watch:
             await self._type_and_submit(prompt)
             log.info("image submitted; waiting for Flow's reply")
             deadline = time.monotonic() + timeout_s
-            while not watch.bodies and time.monotonic() < deadline:
+            while not watch.bodies and not watch.unreadable and time.monotonic() < deadline:
                 await watch.wait(1.0)
-        if not watch.bodies:
-            raise FlowError(f"no image reply within {timeout_s:.0f} s")
-        _rpc_id, status, text = watch.bodies[0]
-        try:
-            payload = be.parse_reply(text, IMAGE_RPC)
-        except be.RpcError as exc:
-            _raise_for_refusal(exc)
-            raise
-        except be.MissingReply as exc:
-            raise FlowError(f"unreadable image reply (HTTP {status})") from exc
-        results = replies.image_results(payload)
+        if watch.bodies:
+            _rpc_id, status, text = watch.bodies[0]
+            try:
+                payload = be.parse_reply(text, IMAGE_RPC)
+            except be.RpcError as exc:
+                _raise_for_refusal(exc)
+                raise
+            except be.MissingReply as exc:
+                raise FlowError(f"unreadable image reply (HTTP {status})") from exc
+            results = replies.image_results(payload)
+            if not results:
+                raise GenerationRefused("Flow answered without any image")
+            return results
+        why = (
+            "Flow's image reply could not be read"
+            if watch.unreadable
+            else f"no image reply within {timeout_s:.0f} s"
+        )
+        log.warning("%s; looking for the new image in the project", why)
+        found = replies.new_media(before, await self.list_media(), submitted - CLOCK_SLACK_S, count)
+        results = []
+        for item in found:
+            urls = await self.edit_view_urls(item.media_id)
+            if "image" in urls:
+                results.append(replies.ImageResult(item.media_id, urls["image"], recovered=True))
+        await self.reload()
         if not results:
-            raise GenerationRefused("Flow answered without any image")
+            raise FlowError(f"{why}, and no new image is in the project")
         return results
+
+    async def grid_media_ids(self) -> set[str]:
+        """The media ids of the tiles the grid shows now (the newest, near the top)."""
+        return {media_id for media_id, _kind, _title in await self.page.evaluate(GRID_TILES_JS)}
+
+    async def list_media(self) -> list[replies.MediaItem]:
+        """The project's media, newest first.
+
+        Read from the list Flow loads with the project page (the page is reloaded for it);
+        when that reply is missing, from the grid's tiles near the top instead.
+        """
+        async with ReplyWatch(self.page, [LIST_RPC]) as watch:
+            await self.page.goto(self.url, wait_until="domcontentloaded")
+            await self.ready()
+            deadline = time.monotonic() + 20
+            while not watch.bodies and not watch.unreadable and time.monotonic() < deadline:
+                await watch.wait(0.5)
+        for _rpc_id, _status, text in watch.bodies:
+            try:
+                items = replies.project_media(be.parse_reply(text, LIST_RPC), self.project_id)
+            except (be.RpcError, be.MissingReply):
+                continue
+            if items:
+                return items
+        log.info("no readable media list; reading the grid's tiles instead")
+        await self.page.evaluate(SCROLL_TOP_JS, s.GRID_SCROLLER)
+        await asyncio.sleep(0.5)
+        return [
+            replies.MediaItem(media_id, kind, title)
+            for media_id, kind, title in await self.page.evaluate(GRID_TILES_JS)
+        ]
 
     async def generate_video(self, prompt: str, timeout_s: float = 600) -> list[VideoClip]:
         """Submit and follow the clip(s) until their signed URLs arrive.
@@ -650,7 +790,7 @@ class FlowPage:
         Flow's submit RPC differs per mode and can change, so the new clips are recognised
         by shape: any record of this project that appears queued or running after the click.
         """
-        with ReplyWatch(self.page, None) as watch:
+        async with ReplyWatch(self.page, None) as watch:
             await self._type_and_submit(prompt)
             log.info("video submitted; following the project's replies")
             deadline = time.monotonic() + timeout_s
@@ -757,7 +897,7 @@ class FlowPage:
         if not await tile.count():
             raise AssetNotFound("the project has no media yet")
         urls: dict[str, dict[str, str]] = {}
-        with ReplyWatch(self.page, ["as29s"]) as watch:
+        async with ReplyWatch(self.page, ["as29s"]) as watch:
             await tile.click()
             await self.page.wait_for_url(re.compile(r".*/edit/.*"), timeout=10_000)
             # The page answers in several batches; wait until the replies go quiet.
@@ -783,7 +923,7 @@ class FlowPage:
     async def edit_view_urls(self, media_id: str) -> dict[str, str]:
         """Fresh signed URLs of one medium, from its own edit view (no grid needed)."""
         found: dict[str, str] = {}
-        with ReplyWatch(self.page, ["as29s"]) as watch:
+        async with ReplyWatch(self.page, ["as29s"]) as watch:
             await self.page.goto(f"{self.url}/edit/{media_id}", wait_until="domcontentloaded")
             started = last = time.monotonic()
             while time.monotonic() - started < 20:
@@ -840,7 +980,7 @@ class FlowPage:
                     raise FlowError(f"size {size!r} is not offered; Flow offers: {offered}")
                 if await entry.first.is_disabled():
                     raise FlowError(f"size {size!r} is not available on this account")
-                with ReplyWatch(self.page, [UPSCALE_RPC]) as upscale:
+                async with ReplyWatch(self.page, [UPSCALE_RPC]) as upscale:
                     await entry.first.click()
                     # Upscaling runs in Flow first: seconds for an image, minutes for a 4K
                     # clip. Flow can also refuse it, which shows only in the RPC's reply.

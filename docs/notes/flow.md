@@ -52,7 +52,8 @@ request the page signed would be circumvention. So:
   | `jwpduf` | video status poll (every ~5 s) |
   | `as29s` | fresh signed URLs (fetched by the edit view) |
   | `jHPbke` | project creation (token-free) |
-| `SPrCad` | upscale behind a 2K/4K download; refused with code 7 / `PUBLIC_ERROR_UNUSUAL_ACTIVITY` after ~45 upscales in 37 min (2026-10-11) |
+  | `Zzl0ze` | the project's media list, loaded with the project page (2026-10-25) |
+  | `SPrCad` | upscale behind a 2K/4K download; refused with code 7 / `PUBLIC_ERROR_UNUSUAL_ACTIVITY` after ~45 upscales in 37 min (2026-10-11) |
 
 - **Image reply.** One tuple per image: `[media_id, _, workflow_id, …, [DETAILS, _, [w, h]]]`
   with a signed `flow-content.google` URL in DETAILS.
@@ -61,6 +62,19 @@ request the page signed would be circumvention. So:
   any reply, because ingredients mode never fetches the finished URL on its own.
 - **Fresh URLs.** Opening `/project/<pid>/edit/<workflow_id>` makes the page fetch fresh
   signed URLs for the project's media.
+- **Media list (`Zzl0ze`).** Workflow records
+  `[workflow_id, null, null, [title, [s, ns], null, null, media_id, generation_id, …], project_id]`
+  (uploads have no generation id) and media records
+  `[media_id, project_id, workflow_id, null, null, DETAILS, IMAGE, VIDEO]` (a clip has the
+  VIDEO block). The same reply also carries items of other projects. In a project of 68
+  clips it was 272 KB.
+- **Cancelled replies (2026-10-25).** The page cancels some replies once it has read them
+  (`net::ERR_ABORTED` after the data arrived): the media list of a large project, and at
+  times an image reply. Chrome keeps no body for a cancelled request, so reading it after
+  the fact fails with "No data found for resource". StudioWright opens a DevTools session
+  of its own and streams each wanted reply (`Network.streamResourceContent`), which keeps
+  the data however the request ends. One request can also carry several RPCs
+  (`rpcids=a,b`).
 
 ## UI facts
 
@@ -105,7 +119,7 @@ running low" banner); StudioWright records it from video submit replies.
 | Image (any Nano Banana model) | 0 (daily quota) |
 | Omni Flash, 360p, 4 s | 4 |
 | Omni Flash, 720p, 4 / 6 / 8 / 10 s | 7 / 10 / 12 / 15 (not linear) |
-| Veo Lite / Fast / Quality | 10 / 20 / 100 |
+| Veo Lite / Fast / Quality | 10 / 10 or 20 / 100 (Fast: 10 on one account, 20 on another, 25 Oct 2026; a start frame does not change the price) |
 
 Prices are read from Flow's own settings pane before submitting (`--dry-run`,
 `--max-credits`). Submits are spaced 20 s apart plus 0-6 s of jitter per profile, across

@@ -20,7 +20,9 @@ StudioWright drives Google Flow's and Google Flow Music's web UIs in the user's 
   - `refs` takes local file paths or media ids. Local files are uploaded once and reused by content afterwards.
 - Video: `flow_generate_video(prompt, model, mode, start, end, refs, aspect, resolution, duration, count, size, max_credits, dry_run)`.
   - Video costs credits. Use `dry_run=true` first to learn Flow's price for free, and pass `max_credits` so a call never spends more than agreed.
-  - Prices seen: Omni 360p 4 s = 4, Veo Lite = 10, Veo Fast = 20, Veo Quality = 100 credits.
+  - Prices seen on 25 Oct 2026: Omni 360p 4 s = 4, Veo Lite = 10, Veo Fast = 10 or 20 (it
+    differed between accounts), Veo Quality = 100 credits. Prices change; `dry_run=true` shows
+    the account's current one for free and uploads nothing (frames and refs do not change it).
   - Confirm with the user before making several clips or using Veo Quality.
   - `mode="frames"`: optional `start` and `end` frames (file or media id). With neither, it is text-to-video.
   - `mode="ingredients"`: `refs` are reference images.
@@ -54,12 +56,15 @@ Flow Music has its own credit balance. Songs are referred to by the `id` values 
 Each result returns `files` (saved local paths) and `job_id`; Flow results add `media_ids`, music results add `songs` (with ids).
 
 - Reuse a `media_id` as a later `ref`, `start` or `end` instead of re-uploading the file, and a song `id` for later music calls.
+- `flow_list_media(project, limit)` lists what a project holds, newest first (media id, kind, title); `flow_download(media_ids=[...])` fetches any of it, e.g. an image that finished after a failed call.
+- A result note "recovered from the project grid" means Flow's reply was lost and the new image was found in the project instead; the image is fine.
 - To show an image to the user, read the saved file.
 
 ## Timing, pacing, failures
 
 - **Timing:** an image takes about 20-30 s, a clip about 30-90 s, a song about 40 s. Calls are queued and paced per profile. Don't fire many calls in parallel; run them one after another.
 - **Unusual activity:** if Flow reports it, the profile cools down for about 30 min. Tell the user and stop; do not retry during the cooldown.
+- **Slower pace:** `flow_pace(gap_s=150)` saves a wider gap between submits for a profile (it lasts across calls and restarts); a profile that has had unusual-activity refusals is safer that way. `flow_pace()` alone shows the current pace.
 - **Clip timeout:** if a clip times out, the error names its media id. Later, `flow_download(media_ids=[...])` fetches it without generating again.
 - **Refusals:** a content refusal is final for that prompt. Rephrase it rather than resubmitting it unchanged.
 - **Failures** leave a screenshot path in the error; mention it to the user.
