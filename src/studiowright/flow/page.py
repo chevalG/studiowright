@@ -20,6 +20,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.async_api import CDPSession, FileChooser, Locator, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeout
 
 from studiowright.browser import ChromeSession, DownloadCatcher, ensure_rendering
 from studiowright.flow import batchexecute as be
@@ -938,6 +939,28 @@ class FlowPage:
                 continue
             found.update(replies.media_urls(payload).get(media_id, {}))
         return found
+
+    async def rename(self, media_id: str, title: str) -> None:
+        """Set one medium's display name through its edit view's title field.
+
+        Flow saves the name on Enter (the grid and the media list show it); the edit view itself
+        can keep showing the old name until the project is opened again (seen 2026-10-26).
+        """
+        await self.page.goto(f"{self.url}/edit/{media_id}", wait_until="domcontentloaded")
+        box = self.page.locator(s.EDIT_TITLE).first
+        try:
+            await box.wait_for(timeout=30_000)
+        except PlaywrightTimeout as exc:
+            raise AssetNotFound(f"no title field in the edit view of {media_id}") from exc
+        await box.click()
+        await box.fill(title)
+        await box.press("Enter")
+        # Give the save request time to leave before the next navigation (the last of a run
+        # was lost once when the tab left after 1.5 s), then blur the field as a second save.
+        await self.page.wait_for_timeout(2500)
+        with contextlib.suppress(Exception):
+            await box.blur()
+        await self.page.wait_for_timeout(1000)
 
     async def download_size(
         self, item_id: str, size: str, folder: Path, timeout_s: float = 900, *, back: bool = True

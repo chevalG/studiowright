@@ -402,6 +402,34 @@ class Studio:
         finally:
             self._download_lock.release()
 
+    async def rename(self, names: dict[str, str], project: str | None = None) -> dict[str, Any]:
+        """Give media display names in Flow's project grid (e.g. I01 for a keyframe, V01 for its
+        clip), so a person can find them in the project by eye.
+
+        ``names`` maps media ids (or unique prefixes) to titles. Runs in the download tab under
+        the download lock, beside generations; one medium's failure does not stop the others.
+        """
+        await asyncio.to_thread(self._download_lock.acquire)
+        try:
+            project_id = await self._project(project)
+            flow = await FlowPage.open(self.session, project_id, role="download")
+            renamed: dict[str, str] = {}
+            errors: dict[str, str] = {}
+            for requested, title in names.items():
+                try:
+                    media_id = self._full_media_id(project_id, requested) or requested
+                    await flow.rename(media_id, title)
+                    renamed[media_id] = title
+                except (FlowError, PlaywrightError) as exc:
+                    errors[requested] = str(exc)
+                    log.warning("rename of %s failed: %s", requested, exc)
+            await flow.page.goto(flow.url, wait_until="domcontentloaded")
+            if errors and not renamed:
+                raise FlowError("; ".join(f"{k}: {v}" for k, v in errors.items()))
+            return {"project_id": project_id, "renamed": renamed, "errors": errors}
+        finally:
+            self._download_lock.release()
+
     async def _fail(self, job_id: str, exc: BaseException, site: str) -> None:
         """Record a failed job with a screenshot of the page it failed on."""
         shot = None
@@ -649,6 +677,9 @@ class Studio:
                 "credits_left": flow.credits_left,
                 "seconds": round(time.time() - started, 1),
             }
+            if frame_ids:
+                # The start (and end) frame media, so a batch can name them beside the clip.
+                result["frame_ids"] = frame_ids
             if notes:
                 result["notes"] = notes
             if flow.credits_left is not None:

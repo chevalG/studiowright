@@ -413,6 +413,9 @@ sw run shots.jsonl
   ids. A music job's `song` takes a song id or a job id.
 - Music `action`s: `create` (default), `extend`, `cover`, `replace`, `variation`, `trim`,
   `stems`, `video`. Extend, replace and trim take their times as `start` / `end`.
+- `name` gives a job's media that display name in Flow's project grid (`V03`; several results
+  become `V03-1`, `V03-2`); a video job's `start_name` names its start frame too (`I03`).
+  `sw media rename MEDIA_ID TITLE ...` does it by hand.
 - Results are appended to `shots.jsonl.results.jsonl`. Running the batch again skips jobs
   that already finished; `--keep-going` continues past a failure.
 

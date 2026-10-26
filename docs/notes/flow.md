@@ -87,6 +87,9 @@ request the page signed would be circumvention. So:
 - The prompt box's own add button opens a picker with tabs and a search field. Search
   matches display names; uploads are named after the staged file (`sw-<sha256[:10]>.jpg`),
   so an old upload is attached by searching its name. Clicking a result attaches it.
+- A medium's display name is the edit view's `input.editable-text-input`; typing a name and
+  Enter saves it (the grid and `Zzl0ze` show it at once; the edit view may show the old name
+  until the project is reopened). Generated media get an AI summary title by default (2026-10-26).
 - `/project/<id>/edit/<media id>` opens a medium's edit view directly (a workflow id works
   too), so sized downloads and fresh URLs need no grid. Generated media offer
   `1K` / `2K` / `4K` there; uploaded images have no size menu and download at once.

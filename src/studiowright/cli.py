@@ -495,6 +495,7 @@ def run(obj: dict[str, str], batch_file: Path, keep_going: bool) -> None:
             studio.image,
             studio.video,
             run_music=studio.music_batch,
+            rename=studio.rename,
             keep_going=keep_going,
             on_event=report,
         )
@@ -972,6 +973,31 @@ def media_list(obj: dict[str, str], project: str | None, limit: int, as_json: bo
         )
     shown = len(result["media"])
     click.echo(f"{shown} of {result['total']} media in {result['project_id']}", err=True)
+
+
+@media.command("rename")
+@click.argument("pairs", nargs=-1, required=True)
+@click.option("--project", help="Project id; defaults to the default project.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+@click.pass_obj
+def media_rename(
+    obj: dict[str, str], pairs: tuple[str, ...], project: str | None, as_json: bool
+) -> None:
+    """Name media in the Flow project grid: MEDIA_ID TITLE [MEDIA_ID TITLE ...].
+
+    A media id may be a unique prefix. Example: sw media rename 1de0ca0c I01 1c61cc15 V01
+    """
+    if len(pairs) % 2:
+        raise click.UsageError("give pairs: MEDIA_ID TITLE [MEDIA_ID TITLE ...]")
+    names = dict(zip(pairs[::2], pairs[1::2], strict=True))
+    result = _run(lambda studio: studio.rename(names, project), obj["profile"])
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=1))
+        return
+    for media_id, title in result["renamed"].items():
+        click.echo(f"{media_id}  ->  {title}")
+    for requested, error in result["errors"].items():
+        click.echo(f"{requested}: {error}", err=True)
 
 
 @main.group(invoke_without_command=True)
