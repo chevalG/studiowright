@@ -145,11 +145,12 @@ def watched_flow(monkeypatch):
     class Watch:
         def __init__(self, *args):
             self.bodies = []
+            self.unreadable = []
 
-        def __enter__(self):
+        async def __aenter__(self):
             return self
 
-        def __exit__(self, *args):
+        async def __aexit__(self, *args):
             pass
 
         async def wait(self, _):

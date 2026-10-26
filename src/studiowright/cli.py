@@ -7,6 +7,7 @@ import contextlib
 import json
 import logging
 import shutil
+import sys
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -88,6 +89,11 @@ def _emit(result: dict[str, Any], as_json: bool) -> None:
 @click.pass_context
 def main(ctx: click.Context, profile: str, verbose: bool) -> None:
     """StudioWright: Google Flow from the terminal. Unofficial; not affiliated with Google."""
+    # Paths are printed as UTF-8 even when Windows redirects the output to a file.
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            reconfigure(encoding="utf-8")
     if verbose:
         logging.basicConfig(
             level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S"
@@ -489,6 +495,7 @@ def run(obj: dict[str, str], batch_file: Path, keep_going: bool) -> None:
             studio.image,
             studio.video,
             run_music=studio.music_batch,
+            rename=studio.rename,
             keep_going=keep_going,
             on_event=report,
         )
@@ -942,12 +949,134 @@ def credits(obj: dict[str, str]) -> None:
 
 
 @main.command()
+@click.option("--project", help="Project to check; defaults to the default project.")
+@click.option("--music", is_flag=True, help="Also check Flow Music (free).")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
 @click.pass_obj
-def pace(obj: dict[str, str]) -> None:
+def doctor(obj: dict[str, str], project: str | None, music: bool, as_json: bool) -> None:
+    """Check that Flow's page still has everything StudioWright uses. Spends nothing.
+
+    Opens menus and panes, reads them and closes them again; submits, uploads and renames
+    nothing. Exits with 1 when a check fails.
+    """
+    result = _run(lambda studio: studio.doctor(project, music), obj["profile"])
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=1))
+    else:
+        for check in result["checks"]:
+            click.echo(f"{check['status']:4}  {check['name']}: {check['detail']}")
+        for shot in result["screenshots"]:
+            click.echo(f"screenshot: {shot}", err=True)
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
+@main.group()
+def media() -> None:
+    """The media in a Flow project."""
+
+
+@media.command("list")
+@click.option("--project", help="Project id; defaults to the default project.")
+@click.option("--limit", default=50, show_default=True, help="Newest media to list.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+@click.pass_obj
+def media_list(obj: dict[str, str], project: str | None, limit: int, as_json: bool) -> None:
+    """List a project's media, newest first; `sw download` fetches any of them."""
+    result = _run(lambda studio: studio.media(project, limit), obj["profile"])
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=1))
+        return
+    for item in result["media"]:
+        created = item["created"]
+        when = time.strftime("%m-%d %H:%M", time.localtime(created)) if created else ""
+        click.echo(
+            f"{item['position']:>3}  {item['media_id']}  {item['kind']:6}  {when:11}  "
+            f"{item['title'] or ''}"
+        )
+    shown = len(result["media"])
+    click.echo(f"{shown} of {result['total']} media in {result['project_id']}", err=True)
+
+
+@media.command("rename")
+@click.argument("pairs", nargs=-1, required=True)
+@click.option("--project", help="Project id; defaults to the default project.")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+@click.pass_obj
+def media_rename(
+    obj: dict[str, str], pairs: tuple[str, ...], project: str | None, as_json: bool
+) -> None:
+    """Name media in the Flow project grid: MEDIA_ID TITLE [MEDIA_ID TITLE ...].
+
+    A media id may be a unique prefix. Example: sw media rename 1de0ca0c I01 1c61cc15 V01
+    """
+    if len(pairs) % 2:
+        raise click.UsageError("give pairs: MEDIA_ID TITLE [MEDIA_ID TITLE ...]")
+    names = dict(zip(pairs[::2], pairs[1::2], strict=True))
+    result = _run(lambda studio: studio.rename(names, project), obj["profile"])
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=1))
+        return
+    for media_id, title in result["renamed"].items():
+        click.echo(f"{media_id}  ->  {title}")
+    for requested, error in result["errors"].items():
+        click.echo(f"{requested}: {error}", err=True)
+
+
+@main.group(invoke_without_command=True)
+@click.pass_context
+def pace(ctx: click.Context) -> None:
+    """Submit pacing for the profile: show it (the default), or save a slower pace."""
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(pace_show)
+
+
+@pace.command("set")
+@click.option("--gap", type=float, help="Seconds between two submits.")
+@click.option("--jitter", type=float, help="Random extra seconds added to each gap.")
+@click.option("--cooldown", type=float, help="Pause in seconds after an unusual-activity refusal.")
+@click.option("--reset", is_flag=True, help="Forget the saved values (back to the defaults).")
+@click.pass_obj
+def pace_set(
+    obj: dict[str, str],
+    gap: float | None,
+    jitter: float | None,
+    cooldown: float | None,
+    reset: bool,
+) -> None:
+    """Save the profile's pacing; every CLI call and MCP tool uses it from then on.
+
+    Environment variables (STUDIOWRIGHT_GAP_S, …) still win over saved values.
+    """
+    from studiowright.pacing import PaceSettings, save_pace
+
+    store = Store()
+    if reset:
+        store.set_setting(f"pace.{obj['profile']}", "{}")
+    try:
+        save_pace(store, obj["profile"], {"gap_s": gap, "jitter_s": jitter, "cooldown_s": cooldown})
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    settings = PaceSettings.load(store, obj["profile"])
+    click.echo(
+        f"{obj['profile']}: {settings.gap_s:.0f} s between submits + up to "
+        f"{settings.jitter_s:.0f} s, {settings.cooldown_s / 60:.0f} min cooldown"
+    )
+
+
+@pace.command("show")
+@click.pass_obj
+def pace_show(obj: dict[str, str]) -> None:
     """Show submit pacing and any cooldown for the profile."""
     from studiowright.pacing import Governor
 
-    status = Governor(Store(), obj["profile"]).status()
+    governor = Governor(Store(), obj["profile"])
+    settings = governor.settings
+    click.echo(
+        f"pace: {settings.gap_s:.0f} s between submits + up to {settings.jitter_s:.0f} s, "
+        f"{settings.cooldown_s / 60:.0f} min cooldown"
+    )
+    status = governor.status()
     now = time.time()
     click.echo(f"next submit allowed in: {max(0.0, status['next_free'] - now):.0f} s")
     cooling = status["cooldown_until"] - now

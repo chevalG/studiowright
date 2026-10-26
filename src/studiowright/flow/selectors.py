@@ -52,6 +52,8 @@ MENU_UPLOAD = f"{OVERLAY} {MENU_ITEM}{icon('upload')}"
 
 #: The download button in a medium's edit view (top toolbar).
 EDIT_DOWNLOAD = f"button{icon('download')}"
+#: The medium's display name in its edit view (an inline text field; Flow saves it on Enter).
+EDIT_TITLE = "input.editable-text-input"
 
 COOKIE_REJECT = "button.glue-cookie-notification-bar__reject"
 DIALOG_CLOSE = f"[role='dialog'] button{icon('close')}"

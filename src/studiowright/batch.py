@@ -11,6 +11,9 @@ A batch file is JSON Lines (one job per line) or a JSON list. Each job is an obj
 
 ``start``, ``end`` and ``refs`` accept file paths, media ids, or the ``id`` of an earlier
 job in the same batch (its first result is used); so does a music job's ``song``.
+``name`` gives the job's media that display name in Flow's project grid (``V03``; several
+results become ``V03-1``, ``V03-2``), and a video job's ``start_name`` names its start frame
+there too (``I03``), so a person can find a shot in Flow by eye.
 Results are appended to ``<batch>.results.jsonl``; running the batch again skips jobs that
 already finished.
 """
@@ -35,7 +38,19 @@ from studiowright.music.options import (
 )
 from studiowright.studio import ImageRequest, VideoRequest
 
-IMAGE_KEYS = {"id", "kind", "prompt", "model", "aspect", "count", "refs", "project", "size", "out"}
+IMAGE_KEYS = {
+    "id",
+    "kind",
+    "prompt",
+    "model",
+    "aspect",
+    "count",
+    "refs",
+    "project",
+    "size",
+    "out",
+    "name",
+}
 MUSIC_KEYS = {
     "id",
     "kind",
@@ -57,7 +72,15 @@ MUSIC_KEYS = {
     "format",
     "out",
 }
-VIDEO_KEYS = IMAGE_KEYS | {"mode", "start", "end", "resolution", "duration", "max_credits"}
+VIDEO_KEYS = IMAGE_KEYS | {
+    "mode",
+    "start",
+    "end",
+    "resolution",
+    "duration",
+    "max_credits",
+    "start_name",
+}
 
 
 class BatchError(ValueError):
@@ -65,7 +88,8 @@ class BatchError(ValueError):
 
 
 def load_jobs(path: Path) -> list[dict[str, Any]]:
-    text = path.read_text(encoding="utf-8").strip()
+    # utf-8-sig: Windows tools often start the file with a byte-order mark.
+    text = path.read_text(encoding="utf-8-sig").strip()
     if not text:
         return []
     if text.startswith("["):
@@ -223,6 +247,21 @@ def _music_job(
     )
 
 
+def display_names(job: dict[str, Any], result: dict[str, Any]) -> dict[str, str]:
+    """Media id -> display name for a finished job's ``name`` and ``start_name``."""
+    names: dict[str, str] = {}
+    media = result.get("media_ids") or []
+    if job.get("name") and media:
+        if len(media) == 1:
+            names[media[0]] = job["name"]
+        else:
+            names.update({m: f"{job['name']}-{i}" for i, m in enumerate(media, 1)})
+    frames = result.get("frame_ids") or []
+    if job.get("start_name") and frames:
+        names[frames[0]] = job["start_name"]
+    return names
+
+
 @dataclass
 class BatchSummary:
     total: int
@@ -237,6 +276,7 @@ async def run_batch(
     run_video: Callable[[VideoRequest], Awaitable[dict[str, Any]]],
     *,
     run_music: Callable[[MusicJob], Awaitable[dict[str, Any]]] | None = None,
+    rename: Callable[[dict[str, str], str | None], Awaitable[dict[str, Any]]] | None = None,
     keep_going: bool = False,
     on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> BatchSummary:
@@ -263,6 +303,16 @@ async def run_batch(
             record.update(status="done", result=result)
             done[job["id"]] = record
             summary.done += 1
+            names = display_names(job, result)
+            if rename and names:
+                # A failed rename never fails the job: the media exist, only their name is missing.
+                try:
+                    named = await rename(names, result.get("project_id"))
+                    record["renamed"] = named.get("renamed")
+                    if named.get("errors"):
+                        record["rename_errors"] = named["errors"]
+                except Exception as exc:
+                    record["rename_error"] = f"{type(exc).__name__}: {exc}"
         except (OptionError, BatchError) as exc:
             record.update(status="invalid", error=str(exc))
             summary.failed += 1

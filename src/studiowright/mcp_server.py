@@ -30,7 +30,7 @@ from studiowright.music.options import (
     MusicRequest,
     VideoTemplate,
 )
-from studiowright.pacing import Governor
+from studiowright.pacing import Governor, PaceSettings, save_pace
 from studiowright.store import Store
 from studiowright.studio import ImageRequest, Studio, VideoRequest
 
@@ -47,6 +47,7 @@ own subscriptions and credits.
 - References and frames accept a local file path (uploaded once, then reused by content)
   or a Flow media id returned by an earlier call.
 - Every result lists the saved file paths and the media ids, which later calls can reuse.
+  flow_list_media lists what a project holds; flow_download fetches any of it by id.
 - Flow Music (music_* tools) has its own credit balance: about 5 credits per new song,
   extension, cover, replacement or variation; about 40 s each. music_library is free and
   shows the balance. Songs are referred to by the "id" values results return, or "last".
@@ -146,7 +147,8 @@ async def flow_generate_video(
     resolution and duration apply to Omni only. size: download size as Flow labels it
     (e.g. "1080p" upscaled from a 720p clip, "270p" GIF); default original.
     max_credits: refuse before submitting if Flow's stated price is higher.
-    dry_run: set everything up and return Flow's price without submitting (free).
+    dry_run: return Flow's price without submitting (free); frames and refs are not
+    uploaded for it, since they do not change the price.
     Returns file paths, media ids and the credits Flow stated.
     """
     if end and not start:
@@ -377,6 +379,57 @@ async def flow_download(
     nothing new."""
     async with Studio(_profile(profile)) as studio:
         return await studio.download(media_ids, project, _out(out_dir), size)
+
+
+@server.tool()
+async def flow_list_media(
+    project: str | None = None, limit: int = 50, profile: str | None = None
+) -> dict[str, Any]:
+    """List a Flow project's media, newest first: media id, kind (image, video or upload),
+    title and grid position. flow_download fetches any of them by id. Generates nothing."""
+    async with Studio(_profile(profile)) as studio:
+        return await studio.media(project, limit)
+
+
+@server.tool()
+async def flow_doctor(
+    project: str | None = None, music: bool = False, profile: str | None = None
+) -> dict[str, Any]:
+    """Check, spending nothing, that Flow's page still has every button, menu and reply
+    StudioWright uses (Flow changes its UI without notice). Run it when calls start failing
+    in a way that looks like a UI change; "ok" is false when a check failed."""
+    async with Studio(_profile(profile)) as studio:
+        return await studio.doctor(project, music)
+
+
+@server.tool()
+async def flow_pace(
+    gap_s: float | None = None,
+    jitter_s: float | None = None,
+    cooldown_s: float | None = None,
+    reset: bool = False,
+    profile: str | None = None,
+) -> dict[str, Any]:
+    """Show or save a profile's submit pacing; saved values persist for every later call.
+
+    gap_s: seconds between two submits (default 20); jitter_s: random extra seconds;
+    cooldown_s: pause after an unusual-activity refusal. A profile that gets unusual-activity
+    refusals is safer with gap_s around 150. Environment variables still override.
+    """
+    name = _profile(profile)
+    store = Store()
+    if reset:
+        store.set_setting(f"pace.{name}", "{}")
+    if reset or any(v is not None for v in (gap_s, jitter_s, cooldown_s)):
+        save_pace(store, name, {"gap_s": gap_s, "jitter_s": jitter_s, "cooldown_s": cooldown_s})
+    settings = PaceSettings.load(store, name)
+    return {
+        "profile": name,
+        "gap_s": settings.gap_s,
+        "jitter_s": settings.jitter_s,
+        "cooldown_s": settings.cooldown_s,
+        "state": Governor(store, name, settings).status(),
+    }
 
 
 @server.tool()
