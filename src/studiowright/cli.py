@@ -948,6 +948,29 @@ def credits(obj: dict[str, str]) -> None:
     click.echo(f"Flow Music: {music['credits_remaining']} credits ({music['plan']})")
 
 
+@main.command()
+@click.option("--project", help="Project to check; defaults to the default project.")
+@click.option("--music", is_flag=True, help="Also check Flow Music (free).")
+@click.option("--json", "as_json", is_flag=True, help="Print JSON.")
+@click.pass_obj
+def doctor(obj: dict[str, str], project: str | None, music: bool, as_json: bool) -> None:
+    """Check that Flow's page still has everything StudioWright uses. Spends nothing.
+
+    Opens menus and panes, reads them and closes them again; submits, uploads and renames
+    nothing. Exits with 1 when a check fails.
+    """
+    result = _run(lambda studio: studio.doctor(project, music), obj["profile"])
+    if as_json:
+        click.echo(json.dumps(result, ensure_ascii=False, indent=1))
+    else:
+        for check in result["checks"]:
+            click.echo(f"{check['status']:4}  {check['name']}: {check['detail']}")
+        for shot in result["screenshots"]:
+            click.echo(f"screenshot: {shot}", err=True)
+    if not result["ok"]:
+        raise SystemExit(1)
+
+
 @main.group()
 def media() -> None:
     """The media in a Flow project."""

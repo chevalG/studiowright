@@ -331,6 +331,7 @@ or in `~/.gemini/settings.json`:
 | `flow_create_project` / `flow_use_project` | Choose where Flow keeps the work |
 | `flow_options` / `flow_status` | Every model and option; recent jobs, pacing and cooldown |
 | `flow_pace` | Show or save a profile's pacing (seconds between submits, cooldown) |
+| `flow_doctor` | Check that Flow's page still has every part StudioWright uses (free) |
 | `music_generate` | A song or instrumental, with lyrics, BPM, length, seed, model, title, cover art |
 | `music_edit` | Extend, cover, replace, variation or trim an existing song |
 | `music_stems` | Split a song into drums, bass, vocals and other |
@@ -363,6 +364,7 @@ sw project create "TITLE" | use ID | list
 sw run BATCH.jsonl [--keep-going]
 sw credits                         # Flow (as of the last clip) and Flow Music balances
 sw pace [set --gap S --jitter S --cooldown S | --reset]   # show or save pacing
+sw doctor [--project ID] [--music]                  # check Flow's UI hooks; spends nothing
 sw jobs | sw window show|hide | sw stop | sw mcp
 ```
 
@@ -486,6 +488,15 @@ Technical notes: [Flow](docs/notes/flow.md) · [Flow Music](docs/notes/flow-musi
 
 Run `sw stop`, then `sw auth login` (Flow) or `sw auth login --url https://www.flowmusic.app/`
 (Flow Music), sign in, and close the window.
+</details>
+
+<details>
+<summary><b>Calls start failing after working for weeks</b></summary>
+
+Google changes Flow's page without notice. `sw doctor` opens the prompt box, the option
+panes, the model menus, a tile's menu, the upload menu, the media list and an edit view,
+reads them and closes them again, and says which part moved. It submits, uploads and
+renames nothing, and keeps a screenshot of each failed check in the `incidents` folder.
 </details>
 
 <details>

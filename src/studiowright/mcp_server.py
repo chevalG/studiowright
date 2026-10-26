@@ -392,6 +392,17 @@ async def flow_list_media(
 
 
 @server.tool()
+async def flow_doctor(
+    project: str | None = None, music: bool = False, profile: str | None = None
+) -> dict[str, Any]:
+    """Check, spending nothing, that Flow's page still has every button, menu and reply
+    StudioWright uses (Flow changes its UI without notice). Run it when calls start failing
+    in a way that looks like a UI change; "ok" is false when a check failed."""
+    async with Studio(_profile(profile)) as studio:
+        return await studio.doctor(project, music)
+
+
+@server.tool()
 async def flow_pace(
     gap_s: float | None = None,
     jitter_s: float | None = None,

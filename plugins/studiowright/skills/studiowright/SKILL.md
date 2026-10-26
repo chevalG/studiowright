@@ -64,6 +64,7 @@ Each result returns `files` (saved local paths) and `job_id`; Flow results add `
 
 - **Timing:** an image takes about 20-30 s, a clip about 30-90 s, a song about 40 s. Calls are queued and paced per profile. Don't fire many calls in parallel; run them one after another.
 - **Unusual activity:** if Flow reports it, the profile cools down for about 30 min. Tell the user and stop; do not retry during the cooldown.
+- **UI changes:** if calls that used to work start failing on a missing button or menu, run `flow_doctor()` (free): it checks every part of Flow's page StudioWright uses and names the one that moved.
 - **Slower pace:** `flow_pace(gap_s=150)` saves a wider gap between submits for a profile (it lasts across calls and restarts); a profile that has had unusual-activity refusals is safer that way. `flow_pace()` alone shows the current pace.
 - **Clip timeout:** if a clip times out, the error names its media id. Later, `flow_download(media_ids=[...])` fetches it without generating again.
 - **Refusals:** a content refusal is final for that prompt. Rephrase it rather than resubmitting it unchanged.

@@ -26,6 +26,7 @@ from playwright.async_api import Playwright, async_playwright
 
 from studiowright import paths
 from studiowright.browser import ChromeSession, attach, place_window
+from studiowright.doctor import OK, WARN, Doctor, check_project_page
 from studiowright.flow import batchexecute as be
 from studiowright.flow.options import ImageOptions, OptionError, VideoMode, VideoOptions
 from studiowright.flow.page import (
@@ -429,6 +430,51 @@ class Studio:
             return {"project_id": project_id, "renamed": renamed, "errors": errors}
         finally:
             self._download_lock.release()
+
+    async def doctor(self, project: str | None = None, music: bool = False) -> dict[str, Any]:
+        """Check that Flow's page still has every part StudioWright uses (``sw doctor``).
+
+        Spends nothing and makes nothing; it holds the profile's lock like a job, so it waits
+        for a running generation to finish.
+        """
+        doctor = Doctor()
+        project_id = project or self.default_project()
+        await self._locked()
+        try:
+            if project_id is None:
+                doctor.add("project page", WARN, "no default project; pass --project to check one")
+            else:
+                flows: list[FlowPage] = []
+
+                async def open_project() -> str:
+                    flows.append(await FlowPage.open(self.session, project_id))
+                    return "signed in; the project page is ready"
+
+                if await doctor.run("sign-in and project page", open_project):
+                    doctor.page = flows[0].page
+                    await check_project_page(doctor, flows[0])
+        finally:
+            self._lock.release()
+        cooling = self.governor.status()["cooldown_until"] - time.time()
+        pace = self.governor.settings
+        if cooling > 0:
+            doctor.add("pacing", WARN, f"cooling down for another {cooling / 60:.0f} min")
+        else:
+            doctor.add("pacing", OK, f"{pace.gap_s:.0f} s between submits, no cooldown")
+        if music:
+
+            async def flow_music() -> str:
+                library = await self.music_library(1)
+                return f"signed in; {library['credits_remaining']} credits ({library['plan']})"
+
+            await doctor.run("Flow Music", flow_music)
+        return {
+            "profile": self.profile,
+            "project_id": project_id,
+            "ok": not doctor.failed,
+            "checks": [check.__dict__ for check in doctor.checks],
+            "screenshots": doctor.screenshots,
+        }
 
     async def _fail(self, job_id: str, exc: BaseException, site: str) -> None:
         """Record a failed job with a screenshot of the page it failed on."""
